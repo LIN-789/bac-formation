@@ -1,12 +1,20 @@
-# 消融：去门控 / 注意力换均值 / 去信道噪声
-# 三组都用同一份训练入口，只换 BAC 提供的开关；正式实验的口径见 docs/contracts.md 第 3 节。
-#   no_gate   : algo.use_gate=false algo.beta_lr=0
-#               （没有门控可调，β 只会在常数比特 L 上单调爬升，故对偶步长置 0）
-#   mean_agg  : algo.aggregate=mean
-#   no_noise  : env.channel.drop_p=0 env.channel.flip_p=0
-#                （评测信道要单独显式给值，否则会跟着训练区间一起变成 0：
-#                 train.eval_drop_p=<原中点> train.eval_flip_p=<原中点>）
+# 消融：去门控 / 注意力换均值 / 去信道噪声（负责人 E）
+# 三组共用同一训练入口，只换 BAC 提供的开关；正式口径见 docs/contracts.md 第 3 节。
+#
+# 变体必须落到独立实验组（driver 会把 name 覆盖成 `ablation_<变体>`）：
+# run_name 只拼 scene_N_algo_L_K_B_seed，不含 aggregate/use_gate/信道，
+# 若与主实验共用 `main` 目录，消融的 s0 会顶掉主实验的 s0。
+#
+#   no_gate  : 不建门控头，bits 恒等于 L；β 只能在常数比特上爬升，故对偶步长置 0
+#   mean_agg : 可见边上均匀平均，attn 退化为「可见权重」而不是注意力
+#   no_noise : 训练区间归零；评测信道必须显式给值，否则评测也在零噪声下跑，
+#              鲁棒性无从比较（driver 自动补 train.eval_drop_p/eval_flip_p = 原区间中点）
 experiment:
-  ablation: [no_gate, mean_agg, no_noise]
-train:
-  total_env_steps: 200000
+  name: ablation
+  ablation:
+    - name: no_gate
+      overrides: {algo.use_gate: false, algo.beta_lr: 0.0}
+    - name: mean_agg
+      overrides: {algo.aggregate: mean}
+    - name: no_noise
+      overrides: {env.channel.drop_p: 0.0, env.channel.flip_p: 0.0}
