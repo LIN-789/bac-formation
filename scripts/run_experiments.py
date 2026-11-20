@@ -5,11 +5,12 @@
 不改 train / evaluate 的任何语义，也不复制它们内部的逻辑。
 
 三个必须挡住的坑（都在脚本里处理）：
-1. 消融变体与主实验 run_name 相同（run_name 不含 aggregate/use_gate/信道），
-   落到同一个 `results/main/` 会互相覆盖 → 每个变体单独实验组 `ablation_<变体>`。
+1. `run_name` 不含 aggregate/use_gate/信道，消融变体彼此同名 → 依赖 #12 的变体后缀
+   （`_aggmean` / `_nogate` / `_nonoise`）区分，本脚本按同一口径计算名字并再查一遍撞名。
 2. `no_noise` 把训练信道归零后，评测信道会跟着变 0，鲁棒性失去对照
    → 自动补 `train.eval_drop_p/eval_flip_p` = 训练区间中点。
-3. 同一 (实验组, run_name) 出现两次 → 直接报错，不落任何目录。
+3. 单因素扫描的基线值与其它轴算出的名字相同 → 默认跳过基线点（由 main 组提供）。
+4. 同一 (实验组, run_name) 出现两次 → 直接报错，不落任何目录。
 
 用法：
     python scripts/run_experiments.py --list
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -51,17 +53,50 @@ _LEGACY_OVERRIDES = {
 }
 
 
+def _channel_off(value) -> bool:
+    """标量 0 视为关闭信道；训练区间 [a, b] 不算（与 train._channel_off 同口径）。"""
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _variant_suffix(cfg: dict) -> str:
+    """消融变体短后缀，与 `train._variant_suffix` 同口径（contracts 第 6 节）。
+
+    默认配置返回空串，既有目录名不受影响；消融只改 aggregate / use_gate / 信道，
+    运行名主体字段全同，不加后缀就会写进同一个目录。
+    """
+    a, e = cfg.get("algo") or {}, cfg.get("env") or {}
+    parts = []
+    aggregate = str(a.get("aggregate", "softmax"))
+    if aggregate != "softmax":
+        parts.append(f"agg{aggregate}")
+    if a.get("use_gate", True) is not True:
+        parts.append("nogate")
+    channel = e.get("channel") or {}
+    drop_off = _channel_off(channel.get("drop_p", 0.0))
+    flip_off = _channel_off(channel.get("flip_p", 0.0))
+    if drop_off and flip_off:
+        parts.append("nonoise")
+    elif drop_off:
+        parts.append("drop0")
+    elif flip_off:
+        parts.append("flip0")
+    return ("_" + "-".join(parts)) if parts else ""
+
+
 def run_name(cfg: dict) -> str:
     """与 `bacmarl.runners.train.run_name` 同一口径（契约第 6 节）。
 
     这里不 import train：它会把 torch 拉进来，排班不该依赖训练依赖。
-    两者一致性由 `tests/test_experiments_plan.py` 在有 torch 的环境下对照。
+    两者一致性由 `tests/test_experiments_plan.py` 在有 torch 的环境下对照（CI 会跑）。
     """
     e, a = cfg["env"], cfg["algo"]
     return (
         f"{e.get('scene', 'formation')}_{e['n_agents']}n_{a.get('name', a['comm'])}"
         f"_L{a.get('msg_bits', 0)}_K{e.get('recv_k', 1)}_B{a.get('budget_bits', 0)}"
-        f"_s{cfg['seed']}"
+        f"_s{cfg['seed']}{_variant_suffix(cfg)}"
     )
 
 
@@ -175,22 +210,24 @@ def plan(
                         tokens.append(f"train.{key}={_fmt(value)}")
                 for seed in seeds:
                     jobs.append(
-                        _job(group, name, seed, tokens, total_env_steps, f"ablation_{name}")
+                        _job(group, name, seed, tokens, total_env_steps, "ablation")
                     )
 
         elif group == "sweep":
             entries = (base.get("experiment") or {}).get("sweep") or []
             for entry in entries:
                 key, values = entry["key"], entry["values"]
-                # 每个扫描轴单独一个实验组：基线值那一点（如 L=4、B=2.0）会让
-                # run_name 与其它轴的基线完全相同，混在一个目录里必然撞名。
-                exp_name = "sweep_" + key.replace(".", "_")
                 for value in values:
                     label = f"{key.split('.')[-1]}={_fmt(value)}"
                     if only and label not in only:
                         continue
+                    # 扫描点改的是 L/K/B，本身就在 run_name 里；但等于默认值的那一点
+                    # 与其它轴的基线算出来同名，默认交给 main 组，不重复训练。
                     if not include_baseline and _dig(base, key) == value:
-                        print(f"[SKIP] {label} 等于当前默认值，基线点由 main 组提供（--include-baseline 可强制跑）")
+                        print(
+                            f"[SKIP] {label} 等于当前默认值，基线点由 main 组提供"
+                            "（--include-baseline 可强制跑）"
+                        )
                         continue
                     for seed in seeds:
                         jobs.append(
@@ -200,12 +237,37 @@ def plan(
                                 seed,
                                 [f"{key}={_fmt(value)}"],
                                 total_env_steps,
-                                exp_name,
+                                "sweep",
                             )
                         )
         else:
             raise ValueError(f"未知实验分组 {group!r}（可选：main / ablation / sweep）")
-    return jobs
+    return _dedupe(jobs)
+
+
+def _dedupe(jobs: list[dict]) -> list[dict]:
+    """同一份**解析后的配置**被多个扫描轴展开时只留一条（`--include-baseline` 会遇到）。
+
+    比较的是合并完成的 cfg（如 `algo.msg_bits=4` 与默认值 4 解析后完全相同），
+    而不是 token 字面量；配置不同却算出同一个 run_name 属于真撞名，
+    留给 `find_collisions` 报错，不会被这里悄悄吞掉。
+    """
+    seen: dict[tuple, dict] = {}
+    out: list[dict] = []
+    for job in jobs:
+        key = (job["exp_name"], job["run_name"], job["seed"])
+        twin = seen.get(key)
+        if twin is not None and _canonical(twin["cfg"]) == _canonical(job["cfg"]):
+            print(f"[DEDUPE] {job['variant']} 与 {twin['variant']} 配置相同，合并为一条")
+            continue
+        seen.setdefault(key, job)
+        out.append(job)
+    return out
+
+
+def _canonical(cfg: dict) -> str:
+    """把配置压成可比较的字符串；非 JSON 类型退化为 repr。"""
+    return json.dumps(cfg, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def find_collisions(jobs: list[dict]) -> list[str]:
