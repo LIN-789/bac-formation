@@ -163,8 +163,8 @@ class Critic(nn.Module):
 | comm/beta | 当前 β |
 | loss/policy, loss/value, loss/entropy | 各项损失 |
 
-- 评估：每隔固定步数用确定性策略跑固定数量回合；鲁棒性由 `evaluate.py` 读 checkpoint，按丢包率网格复测，输出 `robust.csv`（列：drop_p, success_rate, formation_err, speak_rate, bits）。
-- 作图：只读 `metrics.csv` 与 `robust.csv`，曲线为多种子均值 ± 标准差。
+- 评估：每隔固定步数用确定性策略跑固定数量回合；鲁棒性由 `evaluate.py` 读 checkpoint，按丢包率网格复测，输出 `robust.csv`（列：drop_p, success_rate, formation_err, speak_rate, bits；`--with-extra` 才追加 return/collisions/length）。网格来源优先级：`--drop-p` > `--config <实验配置>` > run 的 `config.yaml` > 仓库默认 `configs/experiment/robust.yaml`，实际来源必须打进日志（不许悄悄退化成 `[0.0]`）。
+- 作图：只读 `metrics.csv` 与 `robust.csv`，曲线为多种子均值 ± 标准差；`scripts/make_figures.py` 默认输出到 `results/figures/`（`train_eval_metrics.png`、`comm_metrics.png`、`robust_drop.png`、`curves_return.png`）。
 
 ## 7. 协作流程
 
