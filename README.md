@@ -15,7 +15,11 @@ python scripts/smoke.py              # 契约冒烟：不装 torch 也能过
 python -m pytest -q tests            # 形状与缓冲测试
 python scripts/verify_transitions.py # 实测当前训练采样器的奖励/终止对齐
 python -m bacmarl.runners.train env=formation algo=bac env.n_agents=6 algo.msg_bits=4 seed=0
+python -m bacmarl.runners.qmix env=formation algo=qmix seed=0   # QMIX 基线（值分解）
 ```
+
+基线（IC3Net 式 / TarMAC 式 / QMIX）的摆位、调参记录与复现命令见 [对比基线交付说明](docs/baselines.md)。
+运行名与通信量口径（Issue #11）由 `src/bacmarl/utils/naming.py` 统一实现，别再各写一份。
 
 Windows 没有 make，直接敲上面的命令即可；macOS/Linux 可用 `make smoke` 等目标。
 
@@ -27,10 +31,10 @@ src/bacmarl/
   envs/             环境封装 FormationCommEnv、并行封装、指标（B）
   comm/             通信模块基类与 none/ic3net/tarmac/bac（A、D）
   models/           encoder / actor / critic（C）
-  algos/            PPO、rollout 缓存、β 对偶（C、A）
-  runners/          统一训练与评测入口（C、E）
-  utils/            日志、随机、checkpoint（C、E）
-baselines/          QMIX（BenchMARL）接入位（D）
+  algos/            PPO、rollout 缓存、β 对偶（C、A）；QMIX 与回放（D）
+  runners/          统一训练与评测入口：train / evaluate（C、E）、qmix（D）
+  utils/            日志、随机、checkpoint（C、E）；命名口径 naming（D）
+baselines/          QMIX（BenchMARL）接入说明与日志转换（D）
 scripts/            冒烟、作图、批量脚本（E、F）
 tests/              每个接口一条形状测试
 results/            实验输出（不入库）
@@ -70,9 +74,15 @@ W1 环境+框架+接口冻结 → W2–3 方法跑通 → W4–5 正式实验 �
 - **B 已完成**：真实 MPE2 编队后端、局部邻居/通信掩码、契约奖励与成功判定、批量自动 reset 修复及可复现标定已落地，详见 [B 交付与标定报告](docs/env-calibration.md)。`formation_calibrated` 现在仅是正式配置的兼容别名，避免维护第二份数值。选做的 `simple_spread` 尚未实现，入口会显式报错。
 - **Issue #4 后续修复（2026-11-14）**：正式环境对齐报告的动态朝向，升级仅使用逐机局部观测的脚本控制器；完成阈值重标为 0.09，保持连续 10 步和 100 步时限。N=4/6/8 各 20 个种子全部完成；原径向控制器 0/60。固定朝向、0.05 阈值及旧半径保留在 `formation_legacy`，旧实验指标须与新口径区分。
 
+## D 基线交付（2026-11-21）
+
+- **QMIX 已落地**：`algos/qmix.py`（个体 Q + 单调混合）、`algos/replay.py`（回放 + n 步回报）、`runners/qmix.py`（训练/评测入口，与 PPO 入口共用配置、命名、评测信道与日志列）。它跑同一套 `FormationCommEnv`，不再走 BenchMARL 的外部环境；BenchMARL 路径保留为日志转换（`baselines/qmix_benchmarl/convert.py`）。
+- **Issue #11 已修**：运行名按通信模块真实的 `bits_per_msg` 计算，IC3Net/TarMAC 从 `L0/B1e9` 变为 `L1024/Binf`，无预算写 `Binf`。命名只有一份实现（`utils/naming.py`），并有「名字里的 L == 模块上报 bits」的防漂移测试。详见 [对比基线交付说明](docs/baselines.md)。
+
 ## 已知缺口（按负责人认领）
 
 - **C**：PPO 目前按单步分段更新（缓存的 `h_prev` 逐帧传入，不做全轨迹 BPTT）；需要真实梯度截断时才扩展为分段 BPTT。
-- **D**：`baselines/qmix_benchmarl/` 只有接入说明，QMIX 尚未落地。
-- **E**：`scripts/make_figures.py` 读的是 `results/*/metrics.csv`，正式实验要在 `configs/experiment/main.yaml` 里补齐多 seed 矩阵后才能出统计图。
+- **D**：QMIX 已落地并能在玩具任务上收敛（`tests/test_qmix_learning.py`），但在本奖励、本预算下贪心策略会滑向「散开避碰」：编队误差涨到 ~8、`eval/return` −425，而随机策略是 −115。原因是碰撞项按机对计价、且单调分解表达不了碰撞的联合作用（QTRAN/QPLEX 就是在松绑这条约束）。取舍与三条可选路线见 [对比基线交付说明](docs/baselines.md) §5.2/§8，需要 A 拍板。
+- **E**：`scripts/make_figures.py` 读的是 `results/*/metrics.csv`，正式实验要在 `configs/experiment/main.yaml` 里补齐多 seed 矩阵后才能出统计图；批量驱动还需加算法轴（QMIX 派发到 `runners/qmix.py`，见 `docs/baselines.md` §7）。
+
 

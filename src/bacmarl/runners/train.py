@@ -26,75 +26,13 @@ from bacmarl.runners.rollout import collect_rollout  # noqa: E402
 from bacmarl.utils.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from bacmarl.utils.config import load_config  # noqa: E402
 from bacmarl.utils.logger import RunLogger  # noqa: E402
+from bacmarl.utils.naming import run_name, variant_suffix as _variant_suffix  # noqa: E402
 from bacmarl.utils.normalizer import RunningStd  # noqa: E402
+from bacmarl.utils.runtime import dump_yaml as _dump_yaml  # noqa: E402
+from bacmarl.utils.runtime import eval_channel as _eval_channel  # noqa: E402
 from bacmarl.utils.seeding import set_seed  # noqa: E402
 
 _EVAL_KEYS = _METRIC_KEYS
-
-
-def _eval_channel(env_dict: dict, train_cfg: dict) -> dict:
-    """评测信道取固定值：优先 train.eval_drop_p/eval_flip_p，否则取训练区间中点。"""
-    channel = env_dict.get("channel") or {}
-
-    def fixed(key: str, override: str) -> float:
-        if train_cfg.get(override) is not None:
-            return float(train_cfg[override])
-        value = channel.get(key, 0.0)
-        if isinstance(value, (list, tuple)):
-            return float(0.5 * (float(value[0]) + float(value[-1])))
-        return float(value)
-
-    return {
-        "drop_p": fixed("drop_p", "eval_drop_p"),
-        "flip_p": fixed("flip_p", "eval_flip_p"),
-    }
-
-
-def _channel_off(value) -> bool:
-    """标量 0 视为关闭信道；训练区间 [a, b] 不算（列表转 float 会失败）。"""
-    try:
-        return float(value) == 0.0
-    except (TypeError, ValueError):
-        return False
-
-
-def _variant_suffix(cfg: dict) -> str:
-    """消融变体短后缀；默认配置返回空串，既有目录名不受影响（contracts 第 6 节）。
-
-    消融只改 `aggregate` / `use_gate` / 信道，运行名的六个字段全同，不加后缀会
-    让 mean_agg 与 no_gate 写进同一个目录、后者静默覆盖前者。
-    """
-    a, e = cfg.get("algo") or {}, cfg.get("env") or {}
-    parts = []
-
-    aggregate = str(a.get("aggregate", "softmax"))
-    if aggregate != "softmax":
-        parts.append(f"agg{aggregate}")
-
-    if a.get("use_gate", True) is not True:
-        parts.append("nogate")
-
-    channel = e.get("channel") or {}
-    drop_off = _channel_off(channel.get("drop_p", 0.0))
-    flip_off = _channel_off(channel.get("flip_p", 0.0))
-    if drop_off and flip_off:
-        parts.append("nonoise")
-    elif drop_off:
-        parts.append("drop0")
-    elif flip_off:
-        parts.append("flip0")
-
-    return ("_" + "-".join(parts)) if parts else ""
-
-
-def run_name(cfg: dict) -> str:
-    """运行名规范见 docs/contracts.md 第 6 节。"""
-    e, a = cfg["env"], cfg["algo"]
-    return (
-        f"{e.get('scene', 'formation')}_{e['n_agents']}n_{a.get('name', a['comm'])}"
-        f"_L{a.get('msg_bits', 0)}_K{e.get('recv_k', 1)}_B{a.get('budget_bits', 0)}"
-        f"_s{cfg['seed']}{_variant_suffix(cfg)}"
-    )
 
 
 def _restore_run(tr: dict, actor, critic, opt, dual, scaler) -> int:
@@ -121,19 +59,6 @@ def _restore_run(tr: dict, actor, critic, opt, dual, scaler) -> int:
     steps = int(meta.get("steps", 0))
     print(f"[INFO] resumed {path.name}: steps={steps} beta={dual.beta:.3f}")
     return steps
-
-
-def _dump_yaml(cfg: dict, path: Path) -> None:
-    try:
-        import yaml
-
-        path.write_text(
-            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8"
-        )
-    except Exception:
-        import json
-
-        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
