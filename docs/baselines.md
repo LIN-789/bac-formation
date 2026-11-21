@@ -105,6 +105,25 @@ BenchMARL 这条路没有删：`baselines/qmix_benchmarl/convert.py` 把外部�
 | 运行名 | `utils/naming.run_name` | 同左 |
 | 日志列 | `RunLogger` 全列 | 同列；`comm/*` 恒 0，另有 `qmix/*` 诊断列 |
 
+### 4.4 两条容易读错的边界
+
+**① resume 不等于严格续训。** `runners/qmix.py` 读 `train.resume_from` 时只恢复 agent / target /
+optimizer 与 `meta["steps"]`：回放不落盘，所以续训后 replay 是空的，还要重新预热
+`algo.train_start` 步才开始更新；ε 按 `steps` 重算（会接着退火，这点没问题）。要真正续跑，
+要么一次把 `train.total_env_steps` 设够，要么别把 QMIX 的 resume 和 PPO 的 `resume_from`
+（它恢复 β、优化器动量与奖励缩放统计，见 contracts §4）写成同一件事。
+
+**② `robust.csv` 对 QMIX 是整行平的，不只是 bits/speak。** `env.channel` 只喂给模型侧的通信信道，
+环境物理不读它，而 QMIX 没有通信模块。实测同一 checkpoint 在 `drop_p=0.0` 与 `0.5` 下评测
+五列逐位相同：`return` −265.9562、`formation_err` 4.9634、`collisions` 1.5、`bits`/`speak_rate` 0。
+所以：
+
+- 别把 QMIX 的 robust 曲线和 BAC 的「丢包下比特节省」画在一张图里比——一个是结构性零通信，
+  一个是预算约束在起作用；
+- 报告里若保留丢包鲁棒性图，QMIX 只能当「无通信基线的水平参考线」，并注明它的 `bits` 恒 0、
+  与丢包率无关。
+
+
 ## 5. 调参记录
 
 （下表是实际跑过的配置；「依据」一列写的是观察到的问题，不是事后编的理由。）
@@ -186,24 +205,31 @@ python baselines/qmix_benchmarl/convert.py --in benchmarl_qmix.csv \
   --out results/main/formation_6n_qmix_L0_K3_B0.0_s0
 ```
 
-## 7. 与 E 的接轨（需要 E 改一处）
+## 7. 与 E 的接轨
 
-`scripts/run_experiments.py`（#13）目前只展开 `experiment` 组，算法轴固定为 `algo=bac`。
-「6 方法 × 3 seed」需要再加一个算法轴，并把 QMIX 派发到它自己的入口：
+**命名已经收口（本次已改）**：`scripts/run_experiments.py` 现在直接
+`from bacmarl.utils.naming import run_name`，删掉了驱动里的镜像实现与 `_variant_suffix` 副本；
+`tests/test_experiments_plan.py` 的口径对照从只覆盖 `algo=bac` 扩到
+`bac/mappo/ippo/ic3net/tarmac/qmix`，并断言连续消息算出 `L1024_K3_Binf`。
+所以排班目录名与训练实际写盘的名字不可能再分叉（#17 合并后这里曾经分叉过：驱动算
+`L0_B1000000000.0`、训练写 `L1024_Binf`）。
+
+**还差 E 补一个算法轴**：驱动目前只展开 `experiment` 组，算法固定 `algo=bac`；
+「6 方法 × 3 seed」需要：
 
 1. 加 `--algos bac ippo mappo ic3net tarmac qmix`（默认 `["bac"]`，保持既有行为不变）。
-2. `_job()` 里把 `algo=<name>` 塞进 tokens；`run_name` 直接 `from bacmarl.utils.naming import run_name`，
-   删掉驱动里的镜像实现与 `_variant_suffix` 副本。
+2. `_job()` 里把 `algo=<name>` 塞进 tokens（运行名会跟着变，命名实现已经共用）。
 3. 执行阶段按 `job["algo"] == "qmix"` 选模块：`bacmarl.runners.qmix` 而不是 `bacmarl.runners.train`。
    两条入口的 `k=v` 参数完全一致，命令拼接逻辑不需要第二套。
 4. QMIX 的 `train.total_env_steps`、`seed`、`experiment.name` 与其它方法一致，18 个 run 的
    横轴才对得齐。
 
-在 #13 合并前，可以先用 shell 循环跑 QMIX 的 3 个 seed：
+在那之前，可以先用 shell 循环跑 QMIX 的 3 个 seed：
 
 ```bash
 for s in 0 1 2; do python -m bacmarl.runners.qmix env=formation algo=qmix seed=$s; done
 ```
+
 
 ## 8. 已知限制
 
@@ -216,8 +242,9 @@ for s in 0 1 2; do python -m bacmarl.runners.qmix env=formation algo=qmix seed=$
      加权重），报告里注明「QMIX 用了不同的奖励系数」。
   3. **换更弱的对照任务**：在 N=3、`safe_dist` 更大的设置上跑 QMIX，只用于说明范式差异。
   都不改代码，改配置即可；`docs/baselines.md` 与 PR 里的数就是这个默认配置跑出来的。
-- QMIX 没有通信，`comm/bits`、`speak_rate` 恒为 0，鲁棒性网格是平线；它检验的是范式差异，
-  不参与「比特压缩」比较。
+- QMIX 没有通信，`comm/bits`、`speak_rate` 恒为 0，`robust.csv` 整行平（见 §4.4 ②，有实测）；
+  它检验的是范式差异，不参与「比特压缩」比较。
+- QMIX 的 resume 只恢复网络/优化器/步数，不恢复 replay 与 ε 进度（见 §4.4 ①）。
 - 本机 CPU 上 QMIX 约 9 ms / env_step（20k 步 3 分钟），200k 步单 run 约 30 分钟，
   与 PPO 的 200k run 同量级，可以进同一条队列。
 - BenchMARL 路径只提供转换脚本，没有在本仓库 CI 里跑（依赖太重）；若组里决定以 BenchMARL
