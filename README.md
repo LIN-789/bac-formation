@@ -82,7 +82,7 @@ W1 环境+框架+接口冻结 → W2–3 方法跑通 → W4–5 正式实验 �
 ## 已知缺口（按负责人认领）
 
 - **C**：PPO 目前按单步分段更新（缓存的 `h_prev` 逐帧传入，不做全轨迹 BPTT）；需要真实梯度截断时才扩展为分段 BPTT。
-- **D**：QMIX 只在本机 CPU 上验到 20k 步；200k × 3 seed 的正式数据由 E 的队列跑，调参记录里写明了它对 n 步回报与奖励缩放的依赖。
+- **D**：QMIX 已落地并能在玩具任务上收敛（`tests/test_qmix_learning.py`），但在本奖励、本预算下贪心策略会滑向「散开避碰」：编队误差涨到 ~8、`eval/return` −425，而随机策略是 −115。原因是碰撞项按机对计价、且单调分解表达不了碰撞的联合作用（QTRAN/QPLEX 就是在松绑这条约束）。取舍与三条可选路线见 [对比基线交付说明](docs/baselines.md) §5.2/§8，需要 A 拍板。
 - **E**：`scripts/make_figures.py` 读的是 `results/*/metrics.csv`，正式实验要在 `configs/experiment/main.yaml` 里补齐多 seed 矩阵后才能出统计图；批量驱动还需加算法轴（QMIX 派发到 `runners/qmix.py`，见 `docs/baselines.md` §7）。
 
 
