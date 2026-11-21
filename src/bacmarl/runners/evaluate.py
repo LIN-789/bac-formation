@@ -3,7 +3,16 @@
 评测入口（负责人 E）与训练内评测（负责人 C）共用 `evaluate_policy`，避免两套策略语义。
 
 用法：
-    python -m bacmarl.runners.evaluate --run results/main/formation_6n_bac_L4_K3_B2.0_s0 --episodes 8
+    # 单个 run：网格取该 run 的 config.yaml，缺失时回落到 configs/experiment/robust.yaml
+    python -m bacmarl.runners.evaluate --run results/main/formation_6n_bac_L4_K3_B2.0_s0
+    # 多个 seed 一次跑完（各自写自己的 robust.csv）
+    python -m bacmarl.runners.evaluate --run results/main/xxx_s0 results/main/xxx_s1
+    # 用 experiment=main 训练的 run 里没有 experiment.robustness，显式给网格来源
+    python -m bacmarl.runners.evaluate --run results/main/xxx --config configs/experiment/robust.yaml
+    # 直接给网格（也支持 "[0.0,0.15]" 写法）
+    python -m bacmarl.runners.evaluate --run results/main/xxx --drop-p "0.0,0.15,0.3"
+    # 只看网格、不加载模型（不需要 torch）
+    python -m bacmarl.runners.evaluate --run results/main/xxx --list-grid
 """
 
 from __future__ import annotations
@@ -30,6 +39,94 @@ _METRIC_KEYS = (
     "bits",
     "speak_rate",
 )
+
+# contracts 第 6 节：robust.csv 列 = drop_p, success_rate, formation_err, speak_rate, bits
+DEFAULT_COLUMNS = ("drop_p", "success_rate", "formation_err", "speak_rate", "bits")
+EXTRA_COLUMNS = ("return", "collisions", "length")
+REPO_GRID = ROOT / "configs" / "experiment" / "robust.yaml"
+
+
+def columns(with_extra: bool = False) -> list[str]:
+    """契约列在前；`--with-extra` 时把 return/collisions/length 追加在后。"""
+    cols = list(DEFAULT_COLUMNS)
+    if with_extra:
+        cols.extend(EXTRA_COLUMNS)
+    return cols
+
+
+def grid_from_config(cfg: dict | None) -> list[float] | None:
+    """从 `experiment.robustness.drop_p` 取网格；没有该段返回 None（不返回空列表）。"""
+    rob = ((cfg or {}).get("experiment") or {}).get("robustness") or {}
+    grid = rob.get("drop_p")
+    if grid is None:
+        return None
+    if isinstance(grid, (int, float)):
+        grid = [grid]
+    vals: list[float] = []
+    for g in grid:
+        try:
+            vals.append(float(g))
+        except (TypeError, ValueError):
+            continue
+    return vals or None
+
+
+def _load_config_file(path: Path) -> dict:
+    """读外部实验配置（支持 `extends: main`，与 configs/experiment/*.yaml 同语义）。"""
+    from bacmarl.utils.config import _read_group
+
+    return _read_group(Path(path))
+
+
+def resolve_grid(
+    run_cfg: dict | None,
+    cli_grid: list[float] | None = None,
+    config_path: str | Path | None = None,
+    repo_grid: str | Path | None = None,
+) -> tuple[list[float], str]:
+    """决定丢包网格，优先级：--drop-p > --config > run 的 config.yaml > 仓库默认 > [0.0]。
+
+    返回 (网格, 来源说明)，来源会打到日志里，避免「网格悄悄退化成 [0.0]」。
+    """
+    if cli_grid:
+        return list(cli_grid), "--drop-p"
+    if config_path is not None:
+        try:
+            g = grid_from_config(_load_config_file(Path(config_path)))
+        except Exception as exc:
+            print(f"[WARN] 读 {config_path} 失败（{exc}）")
+            g = None
+        if g:
+            return g, f"--config {config_path}"
+        print(f"[WARN] {config_path} 里没有 experiment.robustness.drop_p，继续回退")
+    g = grid_from_config(run_cfg)
+    if g:
+        return g, "run 的 config.yaml"
+    fallback = Path(repo_grid) if repo_grid is not None else REPO_GRID
+    if fallback.exists():
+        try:
+            g = grid_from_config(_load_config_file(fallback))
+        except Exception as exc:
+            print(f"[WARN] 读默认鲁棒网格失败（{exc}）")
+            g = None
+        if g:
+            return g, f"默认 {fallback}"
+    print("[WARN] 找不到丢包网格，只用 drop_p=0.0 复测")
+    return [0.0], "fallback"
+
+
+def parse_grid(text: str | None) -> list[float] | None:
+    """把 `--drop-p` 文本解析成浮点列表，复用 config 的 `[a,b]` / 逗号分隔语义。"""
+    if not text:
+        return None
+    from bacmarl.utils.config import _parse_scalar
+
+    val = _parse_scalar(text)
+    if isinstance(val, (int, float)):
+        val = [val]
+    if not isinstance(val, list):
+        return None
+    return [float(v) for v in val]
 
 
 def evaluate_policy(
@@ -132,38 +229,59 @@ def _load_actor(run_dir: Path, cfg: dict, ckpt: str):
         return None
 
 
+def _resolve_run(path: str | Path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else ROOT / p
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True)
+    ap.add_argument("--run", nargs="+", required=True, help="一个或多个 run 目录")
     ap.add_argument("--episodes", type=int, default=8)
     ap.add_argument("--ckpt", default="ckpt/last.ckpt")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--config", default=None, help="外部实验配置，读 experiment.robustness.drop_p"
+    )
+    ap.add_argument("--drop-p", default=None, help='显式丢包网格，如 "0.0,0.15,0.3"')
+    ap.add_argument("--flip-p", type=float, default=0.0, help="复测时固定翻转率")
+    ap.add_argument(
+        "--with-extra", action="store_true", help="robust.csv 追加 return/collisions/length"
+    )
+    ap.add_argument("--out", default=None, help="输出 csv 路径（仅单 run 时有效）")
+    ap.add_argument("--list-grid", action="store_true", help="只打印网格并退出")
     args = ap.parse_args(argv if argv is not None else sys.argv[1:])
 
-    run_dir = Path(args.run)
-    if not run_dir.is_absolute():
-        run_dir = ROOT / run_dir
-    cfg = _read_cfg(run_dir)
-    grid = (
-        ((cfg.get("experiment") or {}).get("robustness") or {}).get("drop_p") or [0.0]
-    )
+    cli_grid = parse_grid(args.drop_p)
+    cols = columns(args.with_extra)
 
-    actor = _load_actor(run_dir, cfg, args.ckpt)
-    rows = []
-    for drop_p in grid:
-        ec = EnvConfig.from_dict(cfg.get("env", {}))
-        ec.channel = {"drop_p": float(drop_p), "flip_p": 0.0}
-        m = evaluate_policy(actor, ec, episodes=args.episodes)
-        rows.append({"drop_p": drop_p, **{k: m[k] for k in _METRIC_KEYS}})
+    for run_arg in args.run:
+        run_dir = _resolve_run(run_arg)
+        cfg = _read_cfg(run_dir)
+        grid, source = resolve_grid(
+            cfg, cli_grid=cli_grid, config_path=args.config
+        )
+        print(f"[INFO] {run_dir.name or run_dir} 丢包网格 {grid}（来源：{source}）")
+        if args.list_grid:
+            continue
 
-    out_csv = run_dir / "robust.csv"
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-    print(f"[DONE] {out_csv}")
-    for r in rows:
-        print(r)
+        actor = _load_actor(run_dir, cfg, args.ckpt)
+        rows = []
+        for drop_p in grid:
+            ec = EnvConfig.from_dict(cfg.get("env", {}))
+            ec.channel = {"drop_p": float(drop_p), "flip_p": float(args.flip_p)}
+            m = evaluate_policy(actor, ec, episodes=args.episodes, seed=args.seed)
+            rows.append({"drop_p": float(drop_p), **{k: m[k] for k in cols if k != "drop_p"}})
+
+        out_csv = Path(args.out) if args.out else run_dir / "robust.csv"
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        print(f"[DONE] {out_csv}")
+        for r in rows:
+            print("  " + ", ".join(f"{c}={r[c]:.4f}" for c in cols))
     return 0
 
 
