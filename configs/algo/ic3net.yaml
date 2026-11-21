@@ -4,7 +4,8 @@ algo:
   comm: ic3net
   critic: central
   msg_dim: 32
-  msg_bits: 0              # 由 msg_dim 换算为 32*msg_dim
-  budget_bits: 1e9         # 不设预算
+  msg_bits: 0              # 二值消息长度，连续消息不用（仅给信道采样占位）
+  bits_per_msg: 1024       # 连续消息真实比特宽度 = 32 bit/维 × msg_dim，运行名 L 段用它
+  budget_bits: 1e9         # 不设预算；运行名写 Binf
   beta_init: 0.0
   beta_lr: 0.0

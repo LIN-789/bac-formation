@@ -145,7 +145,11 @@ class Critic(nn.Module):
 
 ## 6. 日志与结果规范（负责人 E）
 
-- 运行名 `{env}_{N}n_{algo}_L{msg_bits}_K{recv_k}_B{budget_bits}_s{seed}`，输出到 `results/{实验组}/{运行名}/`，内含 `config.yaml`、`metrics.csv`、`tb/`、`ckpt/`。
+- 运行名 `{env}_{N}n_{algo}_L{bits}_K{recv_k}_B{budget}_s{seed}`，输出到 `results/{实验组}/{运行名}/`，内含 `config.yaml`、`metrics.csv`、`tb/`、`ckpt/`。唯一实现是 `src/bacmarl/utils/naming.py`（train 与批量驱动共用，不再各写一份）。
+- **L 段是单条消息的比特宽度 `bits_per_msg`**（Issue #11）：二值消息（BAC）取 `algo.msg_bits`；连续消息（IC3Net/TarMAC）取 `algo.bits_per_msg`，即 `32 × algo.msg_dim = 1024`，不得写 `L0`；无通信（MAPPO/IPPO/QMIX）为 `L0`。配置里 `msg_bits=0` 只是给信道采样占位，不代表零比特。
+- **L 与 `comm/bits` 的关系**：`comm/bits` 是每机每步的平均发送量，`comm/bits = 发言率 × L`（门控方法不发言时为 0，丢包也照收不退款），所以 BAC 的 `L4` 在 `B2.0` 预算下实测约 2.0 bit/步，而 TarMAC 无门控，`L1024` 实测就是 1024。汇总表必须同时看 L 与 `comm/bits` 两列，只有 L 会掩盖门控的作用。
+- **预算段**：`budget_bits` 有上限时沿用数字写法（`B2.0`）；无上限（`≥1e6`，如 IC3Net/TarMAC 的 `1e9` 占位）写 `Binf`，不允许出现 `B1000000000.0`。
+- 汇总表/帕累托图必须按运行名里的 L 与 `comm/bits` 两列交叉核对：两者不一致即说明命名口径漂移，先修命名再出图。
 - 消融变体在运行名末尾追加短后缀（默认值不加，既有目录不受影响）：`_agg{aggregate}`（非 `softmax`）、`_nogate`（`use_gate=false`）、`_nonoise`（`env.channel.drop_p=0` 且 `flip_p=0`），单独关一侧记 `_drop0` / `_flip0`，多项用 `-` 连接，例如 `..._s0_aggmean-nogate`。不加后缀会让 mean_agg 与 no_gate 落进同一目录并静默覆盖。
 - 目标目录已有 `metrics.csv` 且本次不是续训时，训练入口打印 `[WARN]` 后覆盖；要并行保留多份请换 `experiment.name`。
 - `configs/experiment/{ablation,sweep,robust}.yaml` 一律 `extends: main`：分组只声明实验矩阵，训练超参只有 `main.yaml` 一份真值；`experiment=<其它>` 不得清空 `train` 段。

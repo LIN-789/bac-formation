@@ -5,6 +5,7 @@ algo:
   critic: central
   msg_dim: 32
   msg_bits: 0
-  budget_bits: 1e9
+  bits_per_msg: 1024       # 每步广播 32 维 fp32 = 1024 bit，运行名 L 段用它
+  budget_bits: 1e9         # 无预算上限；运行名写 Binf
   beta_init: 0.0
   beta_lr: 0.0
