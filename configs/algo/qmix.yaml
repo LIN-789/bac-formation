@@ -1,0 +1,33 @@
+# 值函数分解基线 QMIX（负责人 D）
+#
+# 与 IPPO/MAPPO/IC3Net/TarMAC 共用同一环境、同一团队奖励与同一评测口径；
+# QMIX 不使用通信模块，因此 comm/bits 与 speak_rate 恒为 0。
+# 超参放在 algo.* 下（contracts §5：所有方法共用 train.*，只允许改 algo.*）；
+# gamma 仍取 train.gamma，保证折扣口径与策略梯度方法一致。
+algo:
+  name: qmix
+  comm: none               # 无通信：消息、门控、比特预算都不参与
+  critic: central          # 用混合网络代替集中式 Critic，占位保持配置同构
+  msg_bits: 0              # L=0，运行名 formation_6n_qmix_L0_K3_B0.0_s0
+  budget_bits: 0.0
+  beta_init: 0.0
+  beta_lr: 0.0
+
+  # —— QMIX 专用超参（调参记录见 docs/baselines.md §4）——
+  lr: 5.0e-4               # 值分解对步长比 PPO 敏感，单独给（训练日志里记这条）
+  batch_size: 32           # 每次梯度更新的转移数
+  n_step: 5                # n 步回报：1 步 TD 在 200k 步预算内传不到 100 步的回报量级
+  replay_size: 200000      # 与正式实验总步数同量级，单进程 CPU 内存约 0.3 GB
+  train_start: 2000        # 预热：replay 不足时只采样不更新
+  train_every: 4           # 每 4 个 env_steps 检查一次更新窗口（≤ n_envs 时等价于每轮都更新）
+  updates_per_train: 4     # 每次触发做 4 个梯度步 → 约 1 次更新 / 2 个 env_step
+  target_update: 500       # target 网络硬更新间隔（按梯度步计）
+  mixer_embed: 32          # 混合网络隐层宽度
+  hypernet_embed: 64       # 超网络隐层宽度
+  eps_start: 1.0           # ε-贪心从全局探索退到 5%
+  eps_end: 0.05
+  eps_anneal_steps: 100000
+  double_q: true           # Double-Q：在线网络选动作、target 网络估值，抑制过估计
+  grad_clip: 10.0
+  reward_scale: 0.1        # 学习用奖励缩放（DQN 系常规做法），环境回报照旧记账
+  use_agent_id: true       # 个体 Q 输入追加 agent_id one-hot（PyMARL QMIX 的做法）

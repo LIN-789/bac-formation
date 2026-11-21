@@ -34,3 +34,18 @@ jobs:
           train.total_env_steps=32 train.n_envs=2 train.rollout_len=4
           train.ppo_epochs=1 train.minibatch=8 train.hidden=16
           env.max_steps=6 experiment.name=ci seed=0
+
+      - name: QMIX 基线训练冒烟（真实 MPE2，D）
+        run: >-
+          python -m bacmarl.runners.qmix env=formation algo=qmix
+          train.total_env_steps=32 train.n_envs=2 train.hidden=16
+          algo.train_start=8 algo.train_every=1 algo.batch_size=8
+          algo.target_update=8 algo.replay_size=256
+          env.max_steps=6 experiment.name=ci seed=0
+
+      - name: 连续消息基线的运行名口径（Issue #11）
+        run: >-
+          python -m bacmarl.runners.train env=formation algo=ic3net
+          train.total_env_steps=8 train.n_envs=2 train.rollout_len=4
+          train.ppo_epochs=1 train.minibatch=8 train.hidden=16
+          env.max_steps=6 experiment.name=ci_naming seed=0
